@@ -981,6 +981,21 @@ function urlDeFoto(val){
     return (data && data.publicUrl) || '';
   }catch(e){ return ''; }
 }
+// Borra del Storage todas las fotos de una visita (solo las que son rutas, no base64).
+// Se llama al eliminar una óptica para no dejar archivos huérfanos ocupando espacio.
+async function borrarFotosDeVisita(v){
+  if(!v || !estamosLogueados()) return;
+  const photos = v.photos || (v.datos && v.datos.photos);
+  if(!photos) return;
+  const rutas=[];
+  for(const slot of Object.keys(photos)){
+    const arr=photos[slot];
+    if(!Array.isArray(arr)) continue;
+    for(const val of arr){ if(val && !esDataURL(val)) rutas.push(val); }
+  }
+  if(!rutas.length) return;
+  try{ await sb.storage.from(FOTOS_BUCKET).remove(rutas); }catch(e){ /* si falla, no rompe el borrado */ }
+}
 async function cloudSaveVisit(v){
   if(!estamosLogueados()) return {ok:false, reason:'sin-sesion'};
   // Subir las fotos al Storage y reemplazar los base64 por rutas livianas
@@ -2009,6 +2024,7 @@ async function adminBorrarOptica(){
   if(!confirm(`¿Eliminar definitivamente la óptica "${REV_CURRENT.nombre||''}"? Esta acción no se puede deshacer.`)) return;
   const ok=await cloudDeleteVisita(REV_CURRENT.cloudId);
   if(ok){
+    await borrarFotosDeVisita(REV_CURRENT);  // limpiar sus fotos del Storage
     // sacarla de la lista en memoria y volver
     REV_DATA = REV_DATA.filter(x=>x.cloudId!==REV_CURRENT.cloudId);
     toast('✓ Óptica eliminada');
@@ -2025,6 +2041,7 @@ async function borrarOpticaEvaluada(v){
   if(!confirm(`¿Eliminar definitivamente la óptica "${v.nombre||''}"? Esta acción no se puede deshacer.`)) return false;
   const ok=await cloudDeleteVisita(v.cloudId);
   if(ok){
+    await borrarFotosDeVisita(v);  // limpiar sus fotos del Storage
     REV_DATA = REV_DATA.filter(x=>x.cloudId!==v.cloudId);
     toast('✓ Óptica eliminada');
     return true;
@@ -2237,6 +2254,8 @@ let ASIG_CARGADORES=[], ASIG_ACTUAL=null, ASIG_LISTA=[], ASIG_TIPO='cargador';
 let HUERFANAS=[], SIN_ASESOR=[], ASESORES_ACT=[], BLOQ_POR_USUARIO={};
 // Borra una óptica/sucursal "huérfana" desde el panel de análisis (analista/admin).
 async function borrarOpticaHuerfana(v){
+  // Borrar sus fotos del Storage para no dejar archivos huérfanos
+  try{ await borrarFotosDeVisita(v); }catch(e){}
   // Borrar la visita en la nube
   if(v.cloudId){ try{ await cloudDeleteVisita(v.cloudId); }catch(e){} }
   // Borrar también por nombre (por si hay copias) y su asignación
@@ -2661,6 +2680,7 @@ async function limpiarSucursalesViejas(){
     if(btn){ btn.disabled=true; btn.textContent='🧹 Limpiando…'; }
     let borradas=0;
     for(const s of sucursales){
+      try{ await borrarFotosDeVisita(s.datos); }catch(e){}   // limpiar sus fotos del Storage
       try{ await sb.from('visitas').delete().eq('id', s.id); borradas++; }catch(e){}
       try{ await sb.from('asignaciones_optica').delete().eq('optica_nombre', s.optica); }catch(e){}
     }
@@ -3751,7 +3771,7 @@ function pintarSaved(){
     if(!puedeBorrarVisita(v, evaluada)){ toast(motivoNoBorrar(v, evaluada)); return; }
     if(!confirm('¿Borrar esta visita? Esta acción no se puede deshacer.'))return;
     let ok=true;
-    if(SAVED_DESDE_NUBE && v.cloudId){ ok=await cloudDeleteVisita(v.cloudId); }
+    if(SAVED_DESDE_NUBE && v.cloudId){ ok=await cloudDeleteVisita(v.cloudId); if(ok){ try{ await borrarFotosDeVisita(v); }catch(e){} } }
     if(v.id){ try{ await dbDel(v.id); }catch(e){} }
     if(!ok){ toast('No se pudo borrar. Revisá tus permisos.'); return; }
     toast('✓ Óptica borrada');
