@@ -936,8 +936,55 @@ function dbClear(){return new Promise((res,rej)=>{const t=db.transaction(STORE,'
    Así el formulario puede evolucionar sin migrar la tabla. */
 function estamosLogueados(){ return !!(sb && SESSION.user); }
 
+// ===== FOTOS EN STORAGE (para no inflar la base ni el egress) =====
+// Nombre del bucket donde viven las fotos. Hay que crearlo una vez en Supabase.
+const FOTOS_BUCKET='fotos';
+// ¿El valor es una foto en base64 (data URL) o ya es una ruta guardada en Storage?
+function esDataURL(s){ return typeof s==='string' && s.startsWith('data:'); }
+// Convierte un data URL a Blob para poder subirlo.
+function dataURLaBlob(dataURL){
+  const [cab,b64]=dataURL.split(',');
+  const mime=(cab.match(/data:(.*?);/)||[])[1]||'image/jpeg';
+  const bin=atob(b64); const len=bin.length; const arr=new Uint8Array(len);
+  for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr],{type:mime});
+}
+// Sube al Storage todas las fotos que todavía estén en base64 y devuelve el objeto
+// de fotos con las rutas ya reemplazadas. Las que ya eran rutas quedan igual.
+// Si algo falla, deja la foto como estaba (base64) para no perder nada.
+async function subirFotosAlStorage(photos){
+  if(!photos || !estamosLogueados()) return photos;
+  const out=JSON.parse(JSON.stringify(photos));
+  const carpeta=(SESSION.user && SESSION.user.id) ? SESSION.user.id : 'anon';
+  for(const slot of Object.keys(out)){
+    if(!Array.isArray(out[slot])) continue;
+    for(let i=0;i<out[slot].length;i++){
+      const val=out[slot][i];
+      if(!esDataURL(val)) continue; // ya es una ruta, no la tocamos
+      try{
+        const blob=dataURLaBlob(val);
+        const nombre=`${carpeta}/${Date.now()}_${Math.random().toString(36).slice(2,8)}_${slot}${i}.jpg`;
+        const { error } = await sb.storage.from(FOTOS_BUCKET).upload(nombre, blob, {contentType:'image/jpeg', upsert:false});
+        if(!error){ out[slot][i]=nombre; }         // reemplazamos base64 por la ruta
+        // si hay error, dejamos el base64 (se guardará como antes, sin romper nada)
+      }catch(e){ /* dejamos el base64 */ }
+    }
+  }
+  return out;
+}
+// Dada una foto (ruta de Storage o base64), devuelve algo que <img src> pueda mostrar.
+function urlDeFoto(val){
+  if(esDataURL(val)) return val;                    // visita vieja: base64 directo
+  if(!val) return '';
+  try{
+    const { data } = sb.storage.from(FOTOS_BUCKET).getPublicUrl(val);
+    return (data && data.publicUrl) || '';
+  }catch(e){ return ''; }
+}
 async function cloudSaveVisit(v){
   if(!estamosLogueados()) return {ok:false, reason:'sin-sesion'};
+  // Subir las fotos al Storage y reemplazar los base64 por rutas livianas
+  if(v && v.photos){ try{ v.photos = await subirFotosAlStorage(v.photos); }catch(e){} }
   const fila = {
     visitador: v.visitador || SESSION.nombre || '',
     optica: v.nombre || '',
@@ -2047,7 +2094,7 @@ function readRow(k,val){ return `<div class="review-row"><span class="k">${k}</s
 function fotosFicha(v, slot){
   const fotos = (v.photos && v.photos[slot]) || [];
   if(!fotos.length) return '';
-  return `<div class="ficha-fotos">${fotos.map(d=>`<img src="${d}" data-full="${d}" class="ficha-foto">`).join('')}</div>`;
+  return `<div class="ficha-fotos">${fotos.map(d=>{const u=urlDeFoto(d);return `<img src="${u}" data-full="${u}" class="ficha-foto">`;}).join('')}</div>`;
 }
 function buildReadonlyInfo(v){
   const mp=(base)=>{const n=v[base],p=v[base+'Pop'];return n?`${n}${p?' · POP: '+p:''}`:'';};
@@ -3171,7 +3218,7 @@ function wirePhotos(wrap){const slot=wrap.dataset.photo;
   wrap.innerHTML=`<button type="button" class="photo-btn">📷 Tomar / elegir foto</button><input type="file" accept="image/*" capture="environment" multiple class="hidden"><div class="thumbs"></div>`;
   const btn=wrap.querySelector('.photo-btn'),file=wrap.querySelector('input'),thumbs=wrap.querySelector('.thumbs');
   btn.onclick=()=>file.click();
-  function render(){thumbs.innerHTML=FORM.photos[slot].map((d,i)=>`<div class="thumb"><img src="${d}"><b data-i="${i}">×</b></div>`).join('');}
+  function render(){thumbs.innerHTML=FORM.photos[slot].map((d,i)=>`<div class="thumb"><img src="${urlDeFoto(d)}"><b data-i="${i}">×</b></div>`).join('');}
   thumbs.addEventListener('click',e=>{const b=e.target.closest('b');if(b){FORM.photos[slot].splice(+b.dataset.i,1);render();}});
   file.onchange=async()=>{for(const f of file.files){const d=await compress(f);FORM.photos[slot].push(d);}render();file.value='';toast('Foto agregada');};
   render();
@@ -3758,7 +3805,24 @@ async function exportAll(){
   const rows=[headers];
   for(const v of all){
     const base=safe(v.nombre)+'_'+v.id.slice(-5);const folder=fotosDir.folder(base);const saved={};
-    photoCols.forEach(slot=>{saved[slot]=[];(v.photos[slot]||[]).forEach((d,i)=>{const fn=`${slot}_${i+1}.jpg`;folder.file(fn,d.split(',')[1],{base64:true});saved[slot].push(`Fotos/${base}/${fn}`);});});
+    for(const slot of photoCols){
+      saved[slot]=[];
+      const arr=(v.photos&&v.photos[slot])||[];
+      for(let i=0;i<arr.length;i++){
+        const d=arr[i]; const fn=`${slot}_${i+1}.jpg`;
+        try{
+          if(esDataURL(d)){
+            folder.file(fn, d.split(',')[1], {base64:true});
+          }else{
+            // Foto en Storage: la descargamos para incluirla en el ZIP
+            const url=urlDeFoto(d);
+            const resp=await fetch(url); const buf=await resp.arrayBuffer();
+            folder.file(fn, buf);
+          }
+          saved[slot].push(`Fotos/${base}/${fn}`);
+        }catch(e){ /* si una foto falla, seguimos con el resto */ }
+      }
+    }
     const row=EXPORT_COLS.map(c=>c[1](v)||'');
     photoCols.forEach(slot=>row.push(saved[slot].join(' | ')));
     rows.push(row);
