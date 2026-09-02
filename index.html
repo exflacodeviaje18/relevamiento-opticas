@@ -2810,7 +2810,10 @@ function fMarcas(field,tipo,label,countId){
     <input type="text" class="mInput" autocomplete="off" placeholder="Escribí una marca y Enter…">
     <div class="ac-list"></div><div class="chips"></div><div class="counter"></div></div>`;
 }
-function fPhotos(slot,label){return `<div class="field"><label>${label}</label><div class="photos" data-photo="${slot}"></div></div>`;}
+function fPhotos(slot,label,sugerencia){
+  const nota = sugerencia ? `<p style="font-family:Arial;color:var(--muted);font-size:12px;margin:2px 0 8px;line-height:1.45">📷 ${sugerencia}</p>` : '';
+  return `<div class="field"><label>${label}</label>${nota}<div class="photos" data-photo="${slot}"></div></div>`;
+}
 function fChecks(key,opts){ // multi-select de capacitaciones
   return `<div class="checks" data-checks="${key}">${opts.map(o=>`<button type="button" data-v="${o}"><span class="box">✓</span>${o}</button>`).join('')}</div>`;
 }
@@ -2901,7 +2904,7 @@ function moduleHTML(id){
       <div class="field"><label>¿Exhibe sol?</label>${fSeg('vidSol',YN)}</div>
       <div class="field"><label>¿Exhibe receta?</label>${fSeg('vidReceta',YN)}</div>
       <div class="field cond" data-cond2="vidSol=Sí&vidReceta=Sí"><label>¿Está mezclado sol con receta?</label>${fSeg('vidSolRecMix',YN)}</div>
-      ${fPhotos('vidriera','Foto de la vidriera')}
+      ${fPhotos('vidriera','Foto de la vidriera','Sacá la foto de frente, para que se vea bien la mercadería exhibida. Si podés, incluí también los locales de alrededor.')}
     </div>`;
 
   if(id==='interior')return `
@@ -2927,7 +2930,7 @@ function moduleHTML(id){
 
       <div class="field"><label>¿Hay espacios vacíos?</label>${fSeg('intVacios',YN)}</div>
       <div class="field"><label>Observaciones del interior</label><textarea data-num="intObs" rows="3" placeholder="Comentarios sobre el interior…"></textarea></div>
-      ${fPhotos('interior','Foto del interior')}
+      ${fPhotos('interior','Foto del interior','Sacá las fotos de frente a los exhibidores de armazones, para que se puedan analizar bien.')}
     </div>`;
 
   if(id==='negocio')return `
