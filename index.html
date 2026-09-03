@@ -793,6 +793,7 @@ async function doLogin(){
     try{ await syncBrandsDesdeNube(); }catch(e){} try{ await cloudLoadClientes(); }catch(e){} try{ await cloudLoadPuestos(); }catch(e){} try{ await cargarMisZonas(); }catch(e){}
     document.getElementById('loginPass').value='';
     go('scMenu'); refreshMenu(); actualizarContador();
+    try{ await ofrecerRetomarBorrador(); }catch(e){}
   }catch(e){
     msg.style.color='var(--accent)'; msg.textContent='Ocurrió un error al ingresar. Probá de nuevo.';
   }finally{ btn.disabled=false; }
@@ -923,13 +924,22 @@ const SEED_NAC=['Infinit','Vulk','Rusty','Hardem','Orbital','360','MDQ','Union P
 const SEED_INT=['Ray-Ban','Oakley','Prada','Gucci','Versace','Dolce & Gabbana','Tom Ford','Boss','Etnia Barcelona','Silhouette'];
 
 let db;
-function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);
-  r.onupgradeneeded=e=>{const d=e.target.result;if(!d.objectStoreNames.contains(STORE))d.createObjectStore(STORE,{keyPath:'id'});};
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,2);
+  r.onupgradeneeded=e=>{const d=e.target.result;
+    if(!d.objectStoreNames.contains(STORE))d.createObjectStore(STORE,{keyPath:'id'});
+    if(!d.objectStoreNames.contains('borrador'))d.createObjectStore('borrador',{keyPath:'id'});};
   r.onsuccess=e=>{db=e.target.result;res();};r.onerror=rej;});}
 function dbPut(v){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).put(v);t.oncomplete=res;t.onerror=rej;});}
 function dbDel(id){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).delete(id);t.oncomplete=res;t.onerror=rej;});}
 function dbAll(){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readonly');const rq=t.objectStore(STORE).getAll();rq.onsuccess=()=>res(rq.result);rq.onerror=rej;});}
 function dbClear(){return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).clear();t.oncomplete=res;t.onerror=rej;});}
+
+/* ===== BORRADOR AUTOMÁTICO (para no perder lo cargado si se bloquea el celu) ===== */
+const BORRADOR_ID='borrador_actual';
+function borradorGuardar(obj){return new Promise((res)=>{try{const t=db.transaction('borrador','readwrite');t.objectStore('borrador').put({id:BORRADOR_ID,data:obj,ts:Date.now()});t.oncomplete=()=>res(true);t.onerror=()=>res(false);}catch(e){res(false);}});}
+function borradorLeer(){return new Promise((res)=>{try{const t=db.transaction('borrador','readonly');const rq=t.objectStore('borrador').get(BORRADOR_ID);rq.onsuccess=()=>res(rq.result||null);rq.onerror=()=>res(null);}catch(e){res(null);}});}
+function borradorBorrar(){return new Promise((res)=>{try{const t=db.transaction('borrador','readwrite');t.objectStore('borrador').delete(BORRADOR_ID);t.oncomplete=()=>res(true);t.onerror=()=>res(false);}catch(e){res(false);}});}
+
 
 /* ---------- NUBE: visitas en Supabase ----------
    Guardamos toda la visita como JSON en la columna 'datos'.
@@ -1423,8 +1433,61 @@ function refreshMenu(){
   if(esAsesor && !RELEVANDO) actualizarPendNegocioBadge();
 }
 /* Estado: ¿el cargador ya empezó a relevar una óptica? */
+/* ===== AUTOGUARDADO DE BORRADOR ===== */
+let AUTOSAVE_TIMER=null;
+let BORRADOR_ACTIVO=false;   // hay un relevamiento en curso que conviene guardar
+// ¿El formulario tiene algo cargado como para valer la pena guardarlo?
+function formTieneContenido(){
+  try{
+    const nom=(document.getElementById('opNombre')||{}).value||FORM.optica.nombre||'';
+    if(nom && nom.trim()) return true;
+    if(FORM.nums && Object.values(FORM.nums).some(v=>v!=='' && v!=null)) return true;
+    if(FORM.segs && Object.keys(FORM.segs).length) return true;
+    if(FORM.photos && Object.values(FORM.photos).some(a=>Array.isArray(a)&&a.length)) return true;
+  }catch(e){}
+  return false;
+}
+// Guarda el estado actual del formulario como borrador (incluye fotos).
+async function guardarBorradorAhora(){
+  if(!BORRADOR_ACTIVO) return;
+  if(!formTieneContenido()) return;
+  try{
+    const snapshot={
+      FORM: JSON.parse(JSON.stringify(FORM)),
+      editingId: (typeof editingId!=='undefined')?editingId:null,
+      opNombre: (document.getElementById('opNombre')||{}).value||'',
+      visitador: FORM.visitador||''
+    };
+    await borradorGuardar(snapshot);
+  }catch(e){ /* si el navegador no tiene espacio, no rompemos nada */ }
+}
+// Pide guardar el borrador con un pequeño retardo (para no guardar en cada tecla).
+function pedirAutoguardado(){
+  if(!BORRADOR_ACTIVO) return;
+  if(AUTOSAVE_TIMER) clearTimeout(AUTOSAVE_TIMER);
+  AUTOSAVE_TIMER=setTimeout(guardarBorradorAhora, 1200);
+}
+// Arranca el autoguardado cuando empieza un relevamiento.
+function iniciarAutoguardado(){
+  BORRADOR_ACTIVO=true;
+  // Guardado periódico de respaldo (cada 8s) por si algún cambio no disparó el evento
+  if(!window._autosaveInterval){
+    window._autosaveInterval=setInterval(()=>{ if(BORRADOR_ACTIVO) guardarBorradorAhora(); }, 8000);
+  }
+}
+// Detiene y limpia el borrador (al guardar de verdad o al descartar).
+async function finalizarAutoguardado(){
+  BORRADOR_ACTIVO=false;
+  if(AUTOSAVE_TIMER){ clearTimeout(AUTOSAVE_TIMER); AUTOSAVE_TIMER=null; }
+  try{ await borradorBorrar(); }catch(e){}
+}
+// Momento crítico: al bloquear el teléfono / cambiar de app, guardar YA.
+document.addEventListener('visibilitychange',()=>{ if(document.hidden && BORRADOR_ACTIVO) guardarBorradorAhora(); });
+window.addEventListener('pagehide',()=>{ if(BORRADOR_ACTIVO) guardarBorradorAhora(); });
+
 function empezarRelevamiento(){
   RELEVANDO=true;
+  iniciarAutoguardado();
   refreshMenu();
   // Cargar clientes (si no están) y poblar los filtros de búsqueda
   (async()=>{
@@ -1629,6 +1692,10 @@ async function actualizarAsignadasBadge(){
   }catch(e){ badge.classList.add('hidden'); }
 }
 function volverAlInicio(){
+  // Guardar el borrador antes de limpiar, por si querés retomar después
+  try{ if(BORRADOR_ACTIVO && formTieneContenido()) guardarBorradorAhora(); }catch(e){}
+  if(AUTOSAVE_TIMER){ clearTimeout(AUTOSAVE_TIMER); AUTOSAVE_TIMER=null; }
+  BORRADOR_ACTIVO=false;
   RELEVANDO=false;
   editingId=null; const vis=FORM.visitador; newForm(); FORM.visitador=vis;
   const inp=document.getElementById('opNombre'); if(inp) inp.value='';
@@ -3089,6 +3156,9 @@ function wireWidgets(root){
   // fotos
   root.querySelectorAll('[data-photo]').forEach(wrap=>wirePhotos(wrap));
   updateLejos();
+  // Autoguardado: cualquier cambio dentro del módulo dispara un guardado de borrador
+  root.addEventListener('input', pedirAutoguardado, true);
+  root.addEventListener('change', pedirAutoguardado, true);
 }
 
 /* Borra de verdad los datos de marcas+POP de un tipo ('nac' o 'int')
@@ -3242,8 +3312,8 @@ function wirePhotos(wrap){const slot=wrap.dataset.photo;
   const btn=wrap.querySelector('.photo-btn'),file=wrap.querySelector('input'),thumbs=wrap.querySelector('.thumbs');
   btn.onclick=()=>file.click();
   function render(){thumbs.innerHTML=FORM.photos[slot].map((d,i)=>`<div class="thumb"><img src="${urlDeFoto(d)}"><b data-i="${i}">×</b></div>`).join('');}
-  thumbs.addEventListener('click',e=>{const b=e.target.closest('b');if(b){FORM.photos[slot].splice(+b.dataset.i,1);render();}});
-  file.onchange=async()=>{for(const f of file.files){const d=await compress(f);FORM.photos[slot].push(d);}render();file.value='';toast('Foto agregada');};
+  thumbs.addEventListener('click',e=>{const b=e.target.closest('b');if(b){FORM.photos[slot].splice(+b.dataset.i,1);render();if(typeof pedirAutoguardado==='function')pedirAutoguardado();}});
+  file.onchange=async()=>{for(const f of file.files){const d=await compress(f);FORM.photos[slot].push(d);}render();file.value='';toast('Foto agregada');if(typeof pedirAutoguardado==='function')pedirAutoguardado();};
   render();
 }
 
@@ -3605,6 +3675,7 @@ async function saveVisit(){
   const vis=FORM.visitador;editingId=null;newForm();FORM.visitador=vis;
   document.getElementById('opNombre').value='';
   RELEVANDO=false; // vuelve a la pantalla de inicio
+  try{ await finalizarAutoguardado(); }catch(e){}  // la visita se guardó: ya no hace falta el borrador
   if(estamosLogueados() && !nubeOk){
     toast('Guardada en este equipo. Se subirá cuando haya conexión.');
   }else{
@@ -4104,6 +4175,34 @@ function renderDashCargadorAdmin(){
 /* ============================================================
    INIT
    ============================================================ */
+// Al iniciar, si quedó un borrador a medio cargar, ofrecer retomarlo.
+async function ofrecerRetomarBorrador(){
+  let b=null;
+  try{ b=await borradorLeer(); }catch(e){}
+  if(!b || !b.data || !b.data.FORM) return;
+  const snap=b.data;
+  const nombre=(snap.opNombre||(snap.FORM.optica&&snap.FORM.optica.nombre)||'').trim();
+  const cuando = b.ts ? new Date(b.ts).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+  const detalle = nombre ? `"${nombre}"` : 'una óptica';
+  const msg=`Tenés un relevamiento sin terminar de ${detalle}${cuando?` (guardado el ${cuando})`:''}.\n\n¿Querés retomarlo desde donde lo dejaste?\n\n• Aceptar: seguir con ese relevamiento.\n• Cancelar: empezar de cero (se descarta el borrador).`;
+  if(confirm(msg)){
+    // Retomar: restaurar el FORM y volver al formulario
+    try{
+      FORM = snap.FORM;
+      if(!FORM.photos) FORM.photos={vidriera:[],interior:[],observaciones:[]};
+      editingId = snap.editingId || null;
+      if(snap.visitador) FORM.visitador=snap.visitador;
+      RELEVANDO=true;
+      iniciarAutoguardado();
+      refreshMenu();
+      const inp=document.getElementById('opNombre'); if(inp) inp.value=snap.opNombre||'';
+      toast('Retomamos donde lo dejaste');
+    }catch(e){ console.error(e); await borradorBorrar(); }
+  }else{
+    // Empezar de cero: descartar el borrador
+    try{ await borradorBorrar(); }catch(e){}
+  }
+}
 async function iniciarApp(){
   // Abrir base local (respaldo offline)
   try{ await openDB(); }catch(e){ console.error('IndexedDB no disponible', e); }
@@ -4119,6 +4218,7 @@ async function iniciarApp(){
         await cargarSesion();
         // Mostrar el menú YA, antes de las cargas de red (en el celular la red es más lenta)
         go('scMenu'); refreshMenu();
+        try{ await ofrecerRetomarBorrador(); }catch(e){}
         try{ await syncBrandsDesdeNube(); }catch(e){} try{ await cloudLoadClientes(); }catch(e){} try{ await cloudLoadPuestos(); }catch(e){} try{ await cargarMisZonas(); }catch(e){}
         refreshMenu(); try{ await actualizarContador(); }catch(e){}
         return;
